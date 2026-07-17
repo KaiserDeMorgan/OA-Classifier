@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from PIL import Image
 import seaborn as sns
+from collections import Counter
 from torchmetrics.classification import F1Score, Precision, Recall, ConfusionMatrix
 
 np.random.seed(50)
@@ -30,21 +31,14 @@ transform_augmented = transforms.Compose([
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
-# Load once, no transform yet, split first, THEN decide what transform each split gets
-base_dataset = torchvision.datasets.ImageFolder(root="C:/Users/kaise/Downloads/cleaned_knee_xrays")
-
-n = len(base_dataset)
-n_train = int(0.7 * n)
-n_val = int(0.15 * n)
-n_test = n - n_train - n_val
-
-train_subset, val_subset, test_subset = torch.utils.data.random_split(
-    base_dataset, [n_train, n_val, n_test],
-    generator=torch.Generator().manual_seed(50)
-)
-
-# Wraps a Subset with a chosen transform (ImageFolder without transform gives raw PIL images)
 class TransformSubset(torch.utils.data.Dataset):
+    """
+    Wraps a Subset (from random_split) with a chosen transform.
+    Needed because ImageFolder without a transform gives raw PIL images -
+    this applies the actual transform pipeline (resize/augment/normalize)
+    at __getitem__ time, so train/val/test can each get a different
+    transform even though they're all slices of the same base_dataset.
+    """
     def __init__(self, subset, transform):
         self.subset = subset
         self.transform = transform
@@ -56,39 +50,40 @@ class TransformSubset(torch.utils.data.Dataset):
         img, label = self.subset[idx]
         return self.transform(img), label
 
+def get_dataloaders(data_root, batch_size=64, data_augmentation=True, seed=50, use_oversampling=True, num_workers=1):
+    base_dataset = torchvision.datasets.ImageFolder(root=data_root)
+    n = len(base_dataset)
+    n_train = int(0.7 * n)
+    n_val = int(0.15 * n)
+    n_test = n - n_train - n_val
 
-def load_data(data_augmentation=False):
+    train_subset, val_subset, test_subset = torch.utils.data.random_split(
+        base_dataset, [n_train, n_val, n_test],
+        generator=torch.Generator().manual_seed(seed)
+    )
+
     train_transform = transform_augmented if data_augmentation else transform_original
     train_dataset = TransformSubset(train_subset, train_transform)
-    val_dataset = TransformSubset(val_subset, transform_original)   # never augment val/test
+    val_dataset = TransformSubset(val_subset, transform_original)
     test_dataset = TransformSubset(test_subset, transform_original)
-    return train_dataset, val_dataset, test_dataset
 
+    if use_oversampling:
+        train_labels = [base_dataset.targets[i] for i in train_subset.indices]
+        class_counts = Counter(train_labels)
+        class_weights = {cls: 1.0 / count for cls, count in class_counts.items()}
+        sample_weights = [class_weights[label] for label in train_labels]
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
-train_dataset, val_dataset, test_dataset = load_data(data_augmentation=True)
+    valid_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers)
 
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=1)
-valid_loader = torch.utils.data.DataLoader(val_dataset, batch_size=64, num_workers=1)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64, num_workers=1)
+    print(f"Classes: {base_dataset.classes}")
+    print(f"Train: {len(train_dataset)}  Val: {len(val_dataset)}  Test: {len(test_dataset)}")
 
-print(f"Classes: {base_dataset.classes}")
-print(f"Train: {len(train_dataset)}  Val: {len(val_dataset)}  Test: {len(test_dataset)}")
-
-#Implementing oversampling as there's more 0 and 1 images compared to 3 and 4
-from collections import Counter
-from torch.utils.data import WeightedRandomSampler
-
-train_labels = [base_dataset.targets[i] for i in train_subset.indices]
-
-class_counts = Counter(train_labels)
-print("Train class distribution before weighting:", class_counts)
-
-class_weights = {cls: 1.0 / count for cls, count in class_counts.items()}
-sample_weights = [class_weights[label] for label in train_labels]
-
-sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
-
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, sampler=sampler, num_workers=1)
+    return train_loader, valid_loader, test_loader
 
 def getF1Score(pred, target):
     f1 = F1Score(task="multiclass", num_classes=5)

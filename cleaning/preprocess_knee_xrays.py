@@ -28,9 +28,8 @@ filename -> label, use --labels-csv instead of relying on folder names
 (see --mode flag below).
 
 WHAT THIS PIPELINE DOES, PER IMAGE:
-  1. Load image (grayscale)
-  2. Denoise (mild median filter - X-rays often have salt-and-pepper noise
-     from scanning/digitization)
+  1. Loads the image (grayscale)
+  2. Denoise (mild median filter)
   3. CLAHE contrast enhancement (Contrast Limited Adaptive Histogram
      Equalization) - standard for X-ray preprocessing, brings out
      joint space / osteophyte edges without blowing out contrast
